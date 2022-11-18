@@ -40,8 +40,15 @@ def main() -> None:
     )
     parser.add_argument("--noviews", action="store_true", help="ignore views")
     parser.add_argument("--outfile", help="file to write output to (default: stdout)")
-    args = parser.parse_args()
+    ####
+    parser.add_argument(
+            "--parse_model_fields_to_snake",
+            help="parse the model fields to snake case",
+            action="store_true")
+    parser.add_argument("--prefix_model_name", help="prefix model name", default='')
+    parser.add_argument("--ignore_relationships", help="ignore relationships creation", action='store_true')
 
+    args = parser.parse_args()
     if args.version:
         print(version("sqlacodegen"))
         return
@@ -60,7 +67,14 @@ def main() -> None:
 
     # Instantiate the generator
     generator_class = generators[args.generator].load()
-    generator = generator_class(metadata, engine, set(args.option or ()))
+    generator = generator_class(
+            metadata,
+            engine,
+            set(args.option or ()),
+            parse_model_fields_to_snake=args.parse_model_fields_to_snake,
+            prefix_model_name=args.prefix_model_name,
+            ignore_relationships=args.ignore_relationships,
+            )
 
     # Open the target file (if given)
     with ExitStack() as stack:

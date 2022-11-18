@@ -60,6 +60,7 @@ from .utils import (
     qualified_table_name,
     render_callable,
     uses_default_name,
+    camel_to_snake,
 )
 
 if sys.version_info < (3, 10):
@@ -79,11 +80,18 @@ class CodeGenerator(metaclass=ABCMeta):
     valid_options: ClassVar[set[str]] = set()
 
     def __init__(
-        self, metadata: MetaData, bind: Connection | Engine, options: Sequence[str]
-    ):
+            self,
+            metadata: MetaData,
+            bind: Connection | Engine,
+            options: Sequence[str],
+            **kwargs,
+            ):
         self.metadata: MetaData = metadata
         self.bind: Connection | Engine = bind
         self.options: set[str] = set(options)
+        self.parse_model_fields_to_snake = kwargs.get('parse_model_fields_to_snake', False)
+        self.prefix_model_name = kwargs.get('prefix_model_name', '')
+        self.ignore_relationships = kwargs.get('ignore_relationships', False)
 
         # Validate options
         invalid_options = {opt for opt in options if opt not in self.valid_options}
@@ -112,8 +120,9 @@ class TablesGenerator(CodeGenerator):
         options: Sequence[str],
         *,
         indentation: str = "    ",
+        **kwargs,
     ):
-        super().__init__(metadata, bind, options)
+        super().__init__(metadata, bind, options, **kwargs)
         self.indentation: str = indentation
         self.imports: dict[str, set[str]] = defaultdict(set)
 
@@ -298,7 +307,8 @@ class TablesGenerator(CodeGenerator):
 
     def generate_model_name(self, model: Model, global_names: set[str]) -> None:
         preferred_name = f"t_{model.table.name}"
-        model.name = self.find_free_name(preferred_name, global_names)
+        model_name = self.find_free_name(preferred_name, global_names)
+        model.name = f'{self.prefix_model_name}{model_name}'
 
     def render_module_variables(self, models: list[Model]) -> str:
         return "metadata = MetaData()"
@@ -351,8 +361,12 @@ class TablesGenerator(CodeGenerator):
 
         return render_callable("Index", repr(index.name), *extra_args, kwargs=kwargs)
 
-    def render_column(self, column: Column[Any], show_name: bool) -> str:
+    def render_column(self, column: Column[Any], show_name: bool, **kwargs_) -> str:
         args = []
+        param_name_ = kwargs_.get('column_name')
+        if param_name_:
+            args.append(f"'{param_name_}'")
+
         kwargs: dict[str, Any] = {}
         kwarg = []
         is_sole_pk = column.primary_key and len(column.table.primary_key) == 1
@@ -370,8 +384,7 @@ class TablesGenerator(CodeGenerator):
             for c in column.table.constraints
         )
         is_unique = is_unique or any(
-            i.unique and set(i.columns) == {column} and uses_default_name(i)
-            for i in column.table.indexes
+            i.unique and set(i.columns) == {column} for i in column.table.indexes
         )
         is_primary = any(
             isinstance(c, PrimaryKeyConstraint)
@@ -379,16 +392,13 @@ class TablesGenerator(CodeGenerator):
             and uses_default_name(c)
             for c in column.table.constraints
         )
-        has_index = any(
-            set(i.columns) == {column} and uses_default_name(i)
-            for i in column.table.indexes
-        )
+        has_index = any(set(i.columns) == {column} for i in column.table.indexes)
 
         if show_name:
             args.append(repr(column.name))
 
-        # Render the column type if there are no foreign keys on it or any of them
-        # points back to itself
+        # Render the column type if there are no foreign keys on it or any of them points back to
+        # itself
         if not dedicated_fks or any(fk.column is column for fk in dedicated_fks):
             args.append(self.render_column_type(column.type))
 
@@ -408,7 +418,7 @@ class TablesGenerator(CodeGenerator):
         if is_unique:
             column.unique = True
             kwargs["unique"] = True
-        if has_index:
+        elif has_index:
             column.index = True
             kwarg.append("index")
             kwargs["index"] = True
@@ -673,8 +683,9 @@ class DeclarativeGenerator(TablesGenerator):
         *,
         indentation: str = "    ",
         base_class_name: str = "Base",
+        **kwargs,
     ):
-        super().__init__(metadata, bind, options, indentation=indentation)
+        super().__init__(metadata, bind, options, indentation=indentation, **kwargs)
         self.base_class_name: str = base_class_name
         self.inflect_engine = inflect.engine()
 
@@ -731,11 +742,12 @@ class DeclarativeGenerator(TablesGenerator):
                     model.columns.append(column_attr)
 
         # Add relationships
-        for model in models_by_table_name.values():
-            if isinstance(model, ModelClass):
-                self.generate_relationships(
-                    model, models_by_table_name, links[model.table.name]
-                )
+        if not self.ignore_relationships:
+            for model in models_by_table_name.values():
+                if isinstance(model, ModelClass):
+                    self.generate_relationships(
+                        model, models_by_table_name, links[model.table.name]
+                    )
 
         # Nest inherited classes in their superclasses to ensure proper ordering
         if "nojoined" not in self.options:
@@ -942,7 +954,8 @@ class DeclarativeGenerator(TablesGenerator):
                 if singular_name:
                     preferred_name = singular_name
 
-            model.name = self.find_free_name(preferred_name, global_names)
+            model_name = self.find_free_name(preferred_name, global_names)
+            model.name = f'{self.prefix_model_name}{model_name}'
 
             # Fill in the names for column attributes
             local_names: set[str] = set()
@@ -1127,8 +1140,15 @@ class DeclarativeGenerator(TablesGenerator):
 
     def render_column_attribute(self, column_attr: ColumnAttribute) -> str:
         column = column_attr.column
-        rendered_column = self.render_column(column, column_attr.name != column.name)
-        return f"{column_attr.name} = {rendered_column}"
+        if self.parse_model_fields_to_snake:
+            attr_name = camel_to_snake(column_attr.name)
+            rendered_column = self.render_column(column, column_attr.name != column.name, column_name=column_attr.name)
+        else:
+            attr_name = column_attr.name
+            rendered_column = self.render_column(column, column_attr.name != column.name)
+
+        return f"{attr_name} = {rendered_column}"
+        # return f"{column_attr.name} = {rendered_column}"
 
     def render_relationship(self, relationship: RelationshipAttribute) -> str:
         def render_column_attrs(column_attrs: list[ColumnAttribute]) -> str:
@@ -1146,10 +1166,14 @@ class DeclarativeGenerator(TablesGenerator):
             render_as_string = False
             # Assume that column_attrs are all in relationship.source or none
             for attr in column_attrs:
+                attr_name = attr.name
+                if self.parse_model_fields_to_snake:
+                    attr_name = camel_to_snake(attr_name)
+                
                 if attr.model is relationship.source:
-                    rendered.append(attr.name)
+                    rendered.append(attr_name)
                 else:
-                    rendered.append(f"{attr.model.name}.{attr.name}")
+                    rendered.append(f"{attr.model.name}.{attr_name}")
                     render_as_string = True
 
             if render_as_string:
@@ -1200,12 +1224,20 @@ class DeclarativeGenerator(TablesGenerator):
             kwargs["secondaryjoin"] = render_join(relationship.secondaryjoin)
 
         if relationship.backref:
-            kwargs["back_populates"] = repr(relationship.backref.name)
+            relationship_backref_name = relationship.backref.name
+            if self.parse_model_fields_to_snake:
+                relationship_backref_name = camel_to_snake(relationship_backref_name)
+            
+            kwargs["back_populates"] = repr(relationship_backref_name)
 
         rendered_relationship = render_callable(
             "relationship", repr(relationship.target.name), kwargs=kwargs
         )
-        return f"{relationship.name} = {rendered_relationship}"
+
+        relationship_name = relationship.name
+        if self.parse_model_fields_to_snake:
+            relationship_name = camel_to_snake(relationship_name)
+        return f"{relationship_name} = {rendered_relationship}"
 
 
 class DataclassGenerator(DeclarativeGenerator):
@@ -1219,6 +1251,7 @@ class DataclassGenerator(DeclarativeGenerator):
         base_class_name: str = "Base",
         quote_annotations: bool = False,
         metadata_key: str = "sa",
+        **kwargs,
     ):
         super().__init__(
             metadata,
@@ -1226,6 +1259,7 @@ class DataclassGenerator(DeclarativeGenerator):
             options,
             indentation=indentation,
             base_class_name=base_class_name,
+            **kwargs,
         )
         self.metadata_key: str = metadata_key
         self.quote_annotations: bool = quote_annotations
@@ -1308,7 +1342,10 @@ class DataclassGenerator(DeclarativeGenerator):
             kwargs["default"] = None
             python_type_name = f"Optional[{python_type_name}]"
 
-        rendered_column = self.render_column(column, column_attr.name != column.name)
+        if self.parse_model_fields_to_snake:
+            rendered_column = self.render_column(column, column_attr.name != column.name, column_name=column_attr.name)
+        else:
+            rendered_column = self.render_column(column, column_attr.name != column.name)
         kwargs["metadata"] = f"{{{self.metadata_key!r}: {rendered_column}}}"
         rendered_field = render_callable("field", kwargs=kwargs)
         return f"{column_attr.name}: {python_type_name} = {rendered_field}"
@@ -1347,6 +1384,7 @@ class SQLModelGenerator(DeclarativeGenerator):
         *,
         indentation: str = "    ",
         base_class_name: str = "SQLModel",
+        **kwargs,
     ):
         super().__init__(
             metadata,
@@ -1354,6 +1392,7 @@ class SQLModelGenerator(DeclarativeGenerator):
             options,
             indentation=indentation,
             base_class_name=base_class_name,
+            **kwargs,
         )
 
     def collect_imports(self, models: Iterable[Model]) -> None:
