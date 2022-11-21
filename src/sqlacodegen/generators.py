@@ -37,8 +37,12 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    TEXT,
+    LargeBinary,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.sql.visitors import TraversibleType
+from sqlalchemy.sql.sqltypes import NullType
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import CompileError
 from sqlalchemy.sql.elements import TextClause
@@ -62,6 +66,9 @@ from .utils import (
     uses_default_name,
     camel_to_snake,
 )
+
+index_count = 0
+unique_index_count = 0
 
 if sys.version_info < (3, 10):
     from importlib_metadata import version
@@ -178,6 +185,8 @@ class TablesGenerator(CodeGenerator):
         self.add_import(MetaData)
         for model in models:
             self.collect_imports_for_model(model)
+        # TODO: Remove hard-coded import
+        self.add_literal_import('.specific_db_types', 'COLLATION')
 
     def collect_imports_for_model(self, model: Model) -> None:
         if model.__class__ is Model:
@@ -239,7 +248,7 @@ class TablesGenerator(CodeGenerator):
 
         type_ = type(obj) if not isinstance(obj, type) else obj
         pkgname = type_.__module__
-
+        
         # The column types have already been adapted towards generic types if possible,
         # so if this is still a vendor specific type (e.g., MySQL INTEGER) be sure to
         # use that rather than the generic sqlalchemy type as it might have different
@@ -250,6 +259,8 @@ class TablesGenerator(CodeGenerator):
 
             if type_.__name__ in dialect_pkg.__all__:
                 pkgname = dialect_pkgname
+            # TODO: Remove hard-coded pkgname, use type mapping instead
+            pkgname = '.specific_db_types'
         elif type_.__name__ in sqlalchemy.__all__:  # type: ignore[attr-defined]
             pkgname = "sqlalchemy"
         else:
@@ -354,18 +365,27 @@ class TablesGenerator(CodeGenerator):
         return render_callable("Table", *args, kwargs=kwargs, indentation="    ")
 
     def render_index(self, index: Index) -> str:
+        global index_count, unique_index_count
         extra_args = [repr(col.name) for col in index.columns]
         kwargs = {}
         if index.unique:
             kwargs["unique"] = True
+            unique_index_count += 1
+            i_count = unique_index_count
+            prefix = 'uq'
+        else:
+            index_count += 1
+            i_count = index_count
+            prefix = 'ix'
 
-        return render_callable("Index", repr(index.name), *extra_args, kwargs=kwargs)
+        index_name = f"'{prefix}_{i_count:04d}'"
+        return render_callable("Index", index_name, *extra_args, kwargs=kwargs)
 
     def render_column(self, column: Column[Any], show_name: bool, **kwargs_) -> str:
         args = []
-        param_name_ = kwargs_.get('column_name')
-        if param_name_:
-            args.append(f"'{param_name_}'")
+        # param_name_ = kwargs_.get('column_name')
+        # if param_name_:
+        #     args.append(f"'{param_name_}'")
 
         kwargs: dict[str, Any] = {}
         kwarg = []
@@ -494,6 +514,21 @@ class TablesGenerator(CodeGenerator):
             ):
                 del kwargs["astext_type"]
 
+        if isinstance(coltype, TEXT):
+            args = []
+            kwargs = {'collation': None}
+
+        # TODO: Implement proper type mapping
+        if isinstance(coltype, (NullType, TraversibleType)):
+            coltype = LargeBinary
+
+        # TODO: Remove hard-coded collation, use collation mapping instead
+        if 'collation' in kwargs:
+            kwargs['collation'] = 'COLLATION'
+            # kwargs.pop('collation', None)
+        for i, arg in enumerate(args):
+            if isinstance(arg, str) and 'SQL_Latin1_General_CP1_CI_AS' in arg:
+                args[i] = 'COLLATION'
         if args or kwargs:
             return render_callable(coltype.__class__.__name__, *args, kwargs=kwargs)
         else:
@@ -532,6 +567,8 @@ class TablesGenerator(CodeGenerator):
 
         if isinstance(constraint, Constraint) and not uses_default_name(constraint):
             kwargs["name"] = repr(constraint.name)
+            # TODO: Remove constraint name pop, use ignore constraint mapping
+            kwargs.pop('name')
 
         return render_callable(constraint.__class__.__name__, *args, kwargs=kwargs)
 
@@ -692,13 +729,15 @@ class DeclarativeGenerator(TablesGenerator):
     def collect_imports(self, models: Iterable[Model]) -> None:
         super().collect_imports(models)
         if any(isinstance(model, ModelClass) for model in models):
+            self.add_literal_import('.base', 'Base')
+            self.add_literal_import('.base', 'metadata')
             self.remove_literal_import("sqlalchemy", "MetaData")
-            if _sqla_version < (1, 4):
-                self.add_literal_import(
-                    "sqlalchemy.ext.declarative", "declarative_base"
-                )
-            else:
-                self.add_literal_import("sqlalchemy.orm", "declarative_base")
+            # if _sqla_version < (1, 4):
+            #     self.add_literal_import(
+            #         "sqlalchemy.ext.declarative", "declarative_base"
+            #     )
+            # else:
+            #     self.add_literal_import("sqlalchemy.orm", "declarative_base")
 
     def collect_imports_for_model(self, model: Model) -> None:
         super().collect_imports_for_model(model)
@@ -1027,10 +1066,11 @@ class DeclarativeGenerator(TablesGenerator):
         if not any(isinstance(model, ModelClass) for model in models):
             return super().render_module_variables(models)
 
-        declarations = [f"{self.base_class_name} = declarative_base()"]
-        if any(not isinstance(model, ModelClass) for model in models):
-            declarations.append(f"metadata = {self.base_class_name}.metadata")
-
+        # declarations = [f"{self.base_class_name} = declarative_base()"]
+        # if any(not isinstance(model, ModelClass) for model in models):
+        #     declarations.append(f"metadata = {self.base_class_name}.metadata")
+        # return "\n".join(declarations)
+        declarations = []
         return "\n".join(declarations)
 
     def render_models(self, models: list[Model]) -> str:
@@ -1142,7 +1182,7 @@ class DeclarativeGenerator(TablesGenerator):
         column = column_attr.column
         if self.parse_model_fields_to_snake:
             attr_name = camel_to_snake(column_attr.name)
-            rendered_column = self.render_column(column, column_attr.name != column.name, column_name=column_attr.name)
+            rendered_column = self.render_column(column, attr_name != column.name, column_name=column_attr.name)
         else:
             attr_name = column_attr.name
             rendered_column = self.render_column(column, column_attr.name != column.name)
