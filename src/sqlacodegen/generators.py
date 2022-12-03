@@ -186,7 +186,19 @@ class TablesGenerator(CodeGenerator):
         for model in models:
             self.collect_imports_for_model(model)
         # TODO: Remove hard-coded import
-        self.add_literal_import('.specific_db_types', 'COLLATION')
+        self.add_literal_import('app.database.specific_db_types', 'COLLATION')
+        self.add_literal_import(
+                'app.database.specific_db_types', 'NEW_ID_DEFAULT')
+        self.add_literal_import(
+                'app.database.specific_db_types', 'SEQUENTIAL_ID_DEFAULT')
+        self.add_literal_import(
+                'app.database.specific_db_types', 'DATETIME_DEFAULT')
+        self.add_literal_import(
+                'app.database.specific_db_types', 'DATETIME_UTC_DEFAULT')
+        self.add_literal_import(
+                'app.database.specific_db_types', 'BOOL_FALSE_DEFAULT')
+        self.add_literal_import(
+                'app.database.specific_db_types', 'BOOL_TRUE_DEFAULT')
 
     def collect_imports_for_model(self, model: Model) -> None:
         if model.__class__ is Model:
@@ -260,7 +272,7 @@ class TablesGenerator(CodeGenerator):
             if type_.__name__ in dialect_pkg.__all__:
                 pkgname = dialect_pkgname
             # TODO: Remove hard-coded pkgname, use type mapping instead
-            pkgname = '.specific_db_types'
+            pkgname = 'app.database.specific_db_types'
         elif type_.__name__ in sqlalchemy.__all__:  # type: ignore[attr-defined]
             pkgname = "sqlalchemy"
         else:
@@ -442,11 +454,38 @@ class TablesGenerator(CodeGenerator):
             column.index = True
             kwarg.append("index")
             kwargs["index"] = True
+        
+        def set_server_default(name, default):
+            kwargs["server_default"] = render_callable(name, default)
 
         if isinstance(column.server_default, DefaultClause):
-            kwargs["server_default"] = render_callable(
-                "text", repr(column.server_default.arg.text)
-            )
+            from sqlalchemy.dialects.mssql import TIMESTAMP
+            column_text = column.server_default.arg.text
+            server_default = None
+
+            if '(newsequentialid())' in column_text:
+                set_server_default('text', 'SEQUENTIAL_ID_DEFAULT')
+            
+            if '(newid())' in column_text:
+                set_server_default('text', 'NEW_ID_DEFAULT')
+            
+            if '(getdate())' in column_text:
+                kwargs["server_default"] = 'DATETIME_DEFAULT'
+            
+            if '(getutcdate())' in column_text:
+                kwargs["server_default"] = 'DATETIME_UTC_DEFAULT'
+            
+            if '((0))' in column_text and not column.type == TIMESTAMP:
+                set_server_default('', 'BOOL_FALSE_DEFAULT')
+            
+            if '((1))' in column_text and not column.type == TIMESTAMP:
+                set_server_default('', 'BOOL_TRUE_DEFAULT')
+
+            if server_default is not None:
+                server_default = repr(column_text)
+                set_server_default('text', server_default)
+
+
         elif isinstance(column.server_default, Computed):
             expression = str(column.server_default.sqltext)
 
@@ -1182,6 +1221,8 @@ class DeclarativeGenerator(TablesGenerator):
         column = column_attr.column
         if self.parse_model_fields_to_snake:
             attr_name = camel_to_snake(column_attr.name)
+            if attr_name == '_2_d_views_ready':
+                attr_name = 'views_2d_ready'
             rendered_column = self.render_column(column, attr_name != column.name, column_name=column_attr.name)
         else:
             attr_name = column_attr.name
