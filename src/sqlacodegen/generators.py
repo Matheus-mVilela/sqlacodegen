@@ -691,17 +691,30 @@ class TablesGenerator(CodeGenerator):
             kwargs['name'] = repr(name)
 
         if len(name) >= 63:
-            referent_name = constraint.referred_table.name
-            parent_name = constraint.parent.name
-            name = f'{parent_name}{referent_name}Fk'
+            parent = constraint.parent
+            referred_table = constraint.referred_table
+            column_name = constraint.column_keys[0]
+
+            # fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s
+            name = f'fk{parent.name}{column_name}{referred_table.name}'
             name = camel_to_snake(name)
 
             if len(name) >= 63:
-                name = name.split('_')
-                name = f'{name[0]}_{name[1]}_{name[-2]}_{name[-1]}'
+                # fk_{custome_purchase_order_header}_{quote_header_id}
+                name = f'fk{parent.name}{column_name}'
+                name = camel_to_snake(name)
+
+                if len(name) >= 63:
+                    parent_name = camel_to_snake(constraint.parent.name).split(
+                        '_'
+                    )
+                    referred_table_name = camel_to_snake(
+                        constraint.referred_table.name
+                    ).split('_')
+                    name = f'fk_{parent_name[0]}_{parent_name[1]}_{referred_table_name[0]}_{referred_table_name[1]}'
 
             if name in self.constraint_names:
-                raise Exception('Name already exists')
+                raise Exception(f'FK name: {name} already exists')
 
             self.constraint_names.append(name)
 
@@ -878,7 +891,8 @@ class DeclarativeGenerator(TablesGenerator):
         options: Sequence[str],
         *,
         indentation: str = '    ',
-        base_class_name: str = 'Base',
+        # base_class_name: str = 'Base',
+        base_class_name: str = '',
         **kwargs,
     ):
         super().__init__(
@@ -890,7 +904,7 @@ class DeclarativeGenerator(TablesGenerator):
     def collect_imports(self, models: Iterable[Model]) -> None:
         super().collect_imports(models)
         if any(isinstance(model, ModelClass) for model in models):
-            self.add_literal_import('.base', 'Base')
+            # self.add_literal_import('.base', 'Base')
             self.add_literal_import('.base', 'metadata')
             self.remove_literal_import('sqlalchemy', 'MetaData')
             # if _sqla_version < (1, 4):
