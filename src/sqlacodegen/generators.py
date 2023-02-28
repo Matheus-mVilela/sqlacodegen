@@ -1410,7 +1410,7 @@ class DeclarativeGenerator(TablesGenerator):
             rendered_column = self.render_column(
                 column, column_attr.name != column.name
             )
-
+        attr_name = '_'.join(c for c in attr_name.split('_') if c)
         return f'{attr_name} = {rendered_column}'
         # return f"{column_attr.name} = {rendered_column}"
 
